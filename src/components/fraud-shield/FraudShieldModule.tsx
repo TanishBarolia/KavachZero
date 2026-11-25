@@ -1,104 +1,133 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ModuleProps, ModuleScanInput } from '@/types/security';
-import { Shield, Sparkles, UserCheck, AlertOctagon, ScanEye, Zap } from 'lucide-react';
+import { ModuleProps } from '@/types/security';
+import {
+  StepId,
+  KycSessionState,
+  DocumentValidationResult,
+  ElaFinding,
+  ExifReport,
+  OcrResult,
+  LivenessSessionResult,
+  FaceMatchResult,
+} from '@/lib/kyc/types';
+import { buildScanInput } from '@/lib/kyc/scoring/subScores';
+import { KycStepper } from './ui/KycStepper';
+import { ConsentStep } from './steps/ConsentStep';
+import { DocumentStep } from './steps/DocumentStep';
+import { ForensicsStep } from './steps/ForensicsStep';
+import { LivenessStep } from './steps/LivenessStep';
+import { FaceMatchStep } from './steps/FaceMatchStep';
+import { ReviewStep } from './steps/ReviewStep';
+import { Shield, Sparkles } from 'lucide-react';
+
+const INITIAL_STATE: KycSessionState = {
+  currentStep: 'consent',
+  documentFile: null,
+  documentPreviewUrl: null,
+  documentValidation: null,
+  exif: null,
+  ela: null,
+  ocr: null,
+  idFaceCropUrl: null,
+  selfieCropUrl: null,
+  liveness: null,
+  faceMatch: null,
+  subScores: {
+    liveness: 0,
+    elaExif: 0,
+    ocr: 0,
+  },
+  flags: [],
+  confidence: 96,
+  isAnalyzingDoc: false,
+  isSubmitting: false,
+  submissionComplete: false,
+  errorMessage: null,
+};
 
 export const FraudShieldModule: React.FC<ModuleProps> = ({
   onScanComplete,
   isProcessing,
 }) => {
-  const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [state, setState] = useState<KycSessionState>(INITIAL_STATE);
+  const [completedSteps, setCompletedSteps] = useState<StepId[]>([]);
 
-  const runSimulation = async (preset: 'clean' | 'deepfake' | 'tampered_id') => {
-    setSelectedPreset(preset);
+  const handleStepDone = (step: StepId, next: StepId) => {
+    setCompletedSteps((prev) => (prev.includes(step) ? prev : [...prev, step]));
+    setState((prev) => ({ ...prev, currentStep: next }));
+  };
 
-    let input: ModuleScanInput;
+  const handleDocumentConfirmed = (
+    file: File,
+    validation: DocumentValidationResult,
+    previewUrl: string,
+    initialOcr?: any
+  ) => {
+    setState((prev) => ({
+      ...prev,
+      documentFile: file,
+      documentValidation: validation,
+      documentPreviewUrl: previewUrl,
+      ocr: initialOcr || prev.ocr,
+    }));
+    handleStepDone('document', 'forensics');
+  };
 
-    if (preset === 'clean') {
-      input = {
-        module: 'FINTECH_KYC',
-        rawSubScores: {
-          liveness: 10,
-          elaExif: 12,
-          ocr: 5,
-        },
-        flags: [],
-        metadata: {
-          faceMatchConfidence: 98.4,
-          elaAnomalyScore: 0.04,
-          exifIntegrity: 'VERIFIED_APPLE_IPHONE_15',
-          ocrSanityStatus: 'PASSED_GOV_ID',
-          captureLatencyMs: 342,
-        },
-        confidence: 99,
-      };
-    } else if (preset === 'deepfake') {
-      input = {
-        module: 'FINTECH_KYC',
-        rawSubScores: {
-          liveness: 92,
-          elaExif: 78,
-          ocr: 30,
-        },
-        flags: [
-          {
-            code: 'LIVENESS_SYNTHETIC_TEXTURE',
-            label: 'Diffusion Artifacts & GAN Glare',
-            severity: 'HIGH',
-            details: 'Frequency analysis detected pixel grid repetition and lack of natural micro-saccades.',
-          },
-          {
-            code: 'ELA_BOUNDARY_SPLICING',
-            label: 'Error Level Inconsistency',
-            severity: 'HIGH',
-            details: 'Portrait boundary compression rates diverge by 34% compared to background noise floor.',
-          },
-        ],
-        metadata: {
-          faceMatchConfidence: 41.2,
-          elaAnomalyScore: 0.88,
-          exifIntegrity: 'STRIPPED_OR_SYNTHETIC_CANVAS',
-          ocrSanityStatus: 'MISMATCH_FONT_KERNING',
-          captureLatencyMs: 512,
-        },
-        confidence: 96,
-      };
-    } else {
-      // tampered_id
-      input = {
-        module: 'FINTECH_KYC',
-        rawSubScores: {
-          liveness: 25,
-          elaExif: 65,
-          ocr: 70,
-        },
-        flags: [
-          {
-            code: 'OCR_FONT_KERNING_ANOMALY',
-            label: 'DOB Text Modification Detected',
-            severity: 'MEDIUM',
-            details: 'Date of Birth digit bounding box exhibits non-standard font anti-aliasing.',
-          },
-          {
-            code: 'EXIF_EDIT_SOFTWARE',
-            label: 'Photoshop Signature in Metadata',
-            severity: 'MEDIUM',
-            details: 'EXIF software tags indicate recent edit via external raster manipulation software.',
-          },
-        ],
-        metadata: {
-          faceMatchConfidence: 85.0,
-          elaAnomalyScore: 0.62,
-          exifIntegrity: 'MODIFIED_TIMESTAMP_DISCREPANCY',
-          ocrSanityStatus: 'INCONSISTENT_CHECKSUM',
-          captureLatencyMs: 410,
-        },
-        confidence: 91,
-      };
+  const handleForensicsComplete = (
+    ela: ElaFinding,
+    exif: ExifReport,
+    ocr: OcrResult
+  ) => {
+    setState((prev) => ({
+      ...prev,
+      ela,
+      exif,
+      ocr,
+    }));
+    handleStepDone('forensics', 'liveness');
+  };
+
+  const handleLivenessComplete = (
+    liveness: LivenessSessionResult,
+    selfieDataUrl: string
+  ) => {
+    setState((prev) => ({
+      ...prev,
+      liveness,
+      selfieCropUrl: selfieDataUrl,
+    }));
+    handleStepDone('liveness', 'facematch');
+  };
+
+  const handleFaceMatchComplete = (faceMatch: FaceMatchResult) => {
+    setState((prev) => ({
+      ...prev,
+      faceMatch,
+    }));
+    handleStepDone('facematch', 'review');
+  };
+
+  const handleSubmit = async () => {
+    setState((prev) => ({ ...prev, isSubmitting: true }));
+    try {
+      const payload = buildScanInput(state);
+      await onScanComplete(payload);
+      setState((prev) => ({ ...prev, submissionComplete: true }));
+    } catch (err) {
+      console.error('Submission error:', err);
+    } finally {
+      setState((prev) => ({ ...prev, isSubmitting: false }));
     }
+  };
 
-    await onScanComplete(input);
+  const handleReset = () => {
+    if (state.documentPreviewUrl) {
+      URL.revokeObjectURL(state.documentPreviewUrl);
+    }
+    setState(INITIAL_STATE);
+    setCompletedSteps([]);
   };
 
   return (
@@ -111,10 +140,10 @@ export const FraudShieldModule: React.FC<ModuleProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-white tracking-wide">
-              FINTECH FRAUD SHIELD MODULE
+              FINTECH FRAUD SHIELD // ON-DEVICE KYC
             </h3>
             <p className="text-[11px] text-slate-400 font-mono">
-              Member 2 Component Integration Slot // Accepts `onScanComplete`
+              Privacy-First Biometric & Forensic Inspection Wizard
             </p>
           </div>
         </div>
@@ -124,83 +153,52 @@ export const FraudShieldModule: React.FC<ModuleProps> = ({
         </span>
       </div>
 
-      {/* Integration Notice / Team Harness */}
-      <div className="p-3 rounded-xl bg-white/[0.02] border border-dashed border-white/10 text-xs text-slate-400 leading-relaxed">
-        <p className="flex items-center space-x-1.5 text-slate-300 font-semibold mb-1">
-          <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
-          <span>Teammate Integration Contract</span>
-        </p>
-        Member 2 implements the interactive webcam liveness and client-side ELA/OCR canvas analyzer here. Use the test harnesses below to feed real-time telemetry into Harshil&apos;s Risk Engine.
-      </div>
+      {/* Stepper Header */}
+      <KycStepper currentStep={state.currentStep} completedSteps={completedSteps} />
 
-      {/* Simulation Harness Controls */}
-      <div className="space-y-2">
-        <span className="text-[10px] font-mono tracking-wider uppercase text-slate-400 block">
-          ONE-CLICK SIMULATION HARNESSES:
-        </span>
+      {/* Step Views */}
+      {state.currentStep === 'consent' && (
+        <ConsentStep onAccept={() => handleStepDone('consent', 'document')} />
+      )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-          <button
-            onClick={() => runSimulation('clean')}
-            disabled={isProcessing}
-            className={`p-3 rounded-xl text-left border transition flex flex-col justify-between ${
-              selectedPreset === 'clean'
-                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
-                : 'glass-panel hover:border-emerald-500/30 text-slate-300'
-            }`}
-          >
-            <div className="flex items-center space-x-2 mb-1.5">
-              <UserCheck className="h-4 w-4 text-emerald-400" />
-              <span className="text-xs font-bold">1. Verified KYC</span>
-            </div>
-            <p className="text-[10px] text-slate-400">
-              Clean biometric selfie + untampered ID card (Yields GO)
-            </p>
-          </button>
+      {state.currentStep === 'document' && (
+        <DocumentStep
+          onDocumentConfirmed={handleDocumentConfirmed}
+          onBack={() => setState((prev) => ({ ...prev, currentStep: 'consent' }))}
+        />
+      )}
 
-          <button
-            onClick={() => runSimulation('tampered_id')}
-            disabled={isProcessing}
-            className={`p-3 rounded-xl text-left border transition flex flex-col justify-between ${
-              selectedPreset === 'tampered_id'
-                ? 'bg-amber-500/15 border-amber-500/40 text-amber-200'
-                : 'glass-panel hover:border-amber-500/30 text-slate-300'
-            }`}
-          >
-            <div className="flex items-center space-x-2 mb-1.5">
-              <ScanEye className="h-4 w-4 text-amber-400" />
-              <span className="text-xs font-bold">2. Modified ID</span>
-            </div>
-            <p className="text-[10px] text-slate-400">
-              DOB font splice + Photoshop signature (Yields REVIEW)
-            </p>
-          </button>
+      {state.currentStep === 'forensics' && state.documentFile && (
+        <ForensicsStep
+          documentFile={state.documentFile}
+          onComplete={handleForensicsComplete}
+          onBack={() => setState((prev) => ({ ...prev, currentStep: 'document' }))}
+        />
+      )}
 
-          <button
-            onClick={() => runSimulation('deepfake')}
-            disabled={isProcessing}
-            className={`p-3 rounded-xl text-left border transition flex flex-col justify-between ${
-              selectedPreset === 'deepfake'
-                ? 'bg-rose-500/15 border-rose-500/40 text-rose-200'
-                : 'glass-panel hover:border-rose-500/30 text-slate-300'
-            }`}
-          >
-            <div className="flex items-center space-x-2 mb-1.5">
-              <AlertOctagon className="h-4 w-4 text-rose-400" />
-              <span className="text-xs font-bold">3. Deepfake Face</span>
-            </div>
-            <p className="text-[10px] text-slate-400">
-              Synthetic GAN diffusion artifacts detected (Yields BLOCK)
-            </p>
-          </button>
-        </div>
-      </div>
+      {state.currentStep === 'liveness' && (
+        <LivenessStep
+          onComplete={handleLivenessComplete}
+          onBack={() => setState((prev) => ({ ...prev, currentStep: 'forensics' }))}
+        />
+      )}
 
-      {isProcessing && (
-        <div className="flex items-center justify-center space-x-2 text-xs font-mono text-emerald-400 pt-2">
-          <Zap className="h-3.5 w-3.5 animate-spin" />
-          <span>Hashing telemetry & appending to audit chain...</span>
-        </div>
+      {state.currentStep === 'facematch' && (
+        <FaceMatchStep
+          documentPreviewUrl={state.documentPreviewUrl || ''}
+          selfieUrl={state.selfieCropUrl || ''}
+          onComplete={handleFaceMatchComplete}
+          onBack={() => setState((prev) => ({ ...prev, currentStep: 'liveness' }))}
+        />
+      )}
+
+      {state.currentStep === 'review' && (
+        <ReviewStep
+          state={state}
+          onSubmit={handleSubmit}
+          onReset={handleReset}
+          isProcessing={isProcessing || state.isSubmitting}
+        />
       )}
     </div>
   );
